@@ -246,7 +246,12 @@ th{color:var(--muted);font-weight:600}
         <div>必要月平均 <b>¥166,667</b></div>
       </div>
     </div>
-    <div class="installTip">📱 iPhoneでは「共有」→「ホーム画面に追加」でアプリ風に使えます。入力データはこの端末に自動保存されます。</div>
+    <div class="installTip">📱 iPhoneでは「共有」→「ホーム画面に追加」でアプリ風に使えます。☁️ Firebaseで2人のiPhoneがリアルタイム同期されます。</div>
+  </section>
+
+  <section class="card">
+    <div class="panelTitle"><h2>Cloud Sync</h2><span class="label" id="syncStatus">接続準備中</span></div>
+    <div class="comment" id="syncMessage">Firebaseへ接続しています。初回だけ数秒かかります。</div>
   </section>
 
   <section class="grid">
@@ -345,13 +350,38 @@ th{color:var(--muted);font-weight:600}
 </nav>
 
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-<script>
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-app.js";
+import {
+  getFirestore,
+  doc,
+  setDoc,
+  onSnapshot,
+  enableIndexedDbPersistence,
+  serverTimestamp
+} from "https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore.js";
 const TARGET=4000000, MONTHS=24, NEED=Math.ceil(TARGET/MONTHS);
 const STORE="yuKanaSavingsStep1";
 const $=id=>document.getElementById(id);
 const yen=n=>"¥"+Math.round(n||0).toLocaleString();
 let data=JSON.parse(localStorage.getItem(STORE)||"[]");
 let charts={};
+
+const firebaseConfig = {
+  apiKey: "AIzaSyAZjTYd_SS4nD9br4pbTz2TZHo2EQ8Rzwk",
+  authDomain: "yu-kana-savings.firebaseapp.com",
+  projectId: "yu-kana-savings",
+  storageBucket: "yu-kana-savings.firebasestorage.app",
+  messagingSenderId: "557850361251",
+  appId: "1:557850361251:web:516e1a4c14282a266f6e16"
+};
+
+const app = initializeApp(firebaseConfig);
+const db = getFirestore(app);
+const savingDocRef = doc(db, "coupleSavings", "main");
+
+let applyingCloud = false;
+let syncReady = false;
 
 function monthLabel(i){
   const d=new Date(2026,6+i,1);
@@ -372,7 +402,7 @@ function init(){
   $("importBtn").addEventListener("click",()=>$("importFile").click());
   $("importFile").addEventListener("change",importJSON);
   $("resetBtn").addEventListener("click",resetAll);
-  loadForm(); render();
+  loadForm(); render(); startCloudSync();
 }
 function loadForm(){
   const i=+$("month").value;
@@ -387,6 +417,7 @@ function save(){
   data=data.filter(x=>x.i!==i).concat(row).sort((a,b)=>a.i-b.i);
   localStorage.setItem(STORE,JSON.stringify(data));
   render();
+  if(!applyingCloud) saveToCloud();
   toast("保存しました。今月の数字、未来に刻印完了。");
   const saved=row.yu+row.kana-row.expense;
   if(saved>=NEED) confetti();
@@ -617,6 +648,7 @@ function importJSON(e){
       data=parsed.filter(x=>Number.isFinite(+x.i)).map(x=>({i:+x.i,yu:+x.yu||0,kana:+x.kana||0,expense:+x.expense||0})).sort((a,b)=>a.i-b.i);
       localStorage.setItem(STORE,JSON.stringify(data));
       render();
+      saveToCloud();
       toast("復元しました。");
     }catch(err){
       toast("復元できませんでした。JSONファイルを確認してください。");
@@ -629,6 +661,7 @@ function resetAll(){
   if(!confirm("全データを削除します。よろしいですか？")) return;
   data=[];
   localStorage.removeItem(STORE);
+  saveToCloud();
   render();
   toast("全データを削除しました。");
 }
@@ -640,6 +673,86 @@ function downloadFile(name,content,type){
   a.remove();URL.revokeObjectURL(url);
 }
 
+
+
+function setSyncStatus(text, cls="label"){
+  const el=$("syncStatus");
+  if(el){
+    el.textContent=text;
+    el.className=cls;
+  }
+}
+function setSyncMessage(text){
+  const el=$("syncMessage");
+  if(el) el.textContent=text;
+}
+async function saveToCloud(){
+  try{
+    await setDoc(savingDocRef,{
+      data:data,
+      updatedAt:serverTimestamp(),
+      updatedBy:navigator.userAgent.includes("iPhone") ? "iPhone" : "browser"
+    },{merge:true});
+    syncReady=true;
+    setSyncStatus("同期済み","label green");
+    setSyncMessage("Firebaseに保存済みです。相手側の画面にも自動反映されます。");
+  }catch(error){
+    console.error(error);
+    setSyncStatus("同期失敗","label red");
+    setSyncMessage("クラウド保存に失敗しました。Firestoreルール・通信環境を確認してください。");
+    toast("クラウド保存に失敗しました。");
+  }
+}
+function startCloudSync(){
+  try{
+    setSyncStatus("接続中","label gold");
+    setSyncMessage("Firebaseへ接続しています。");
+
+    enableIndexedDbPersistence(db).catch(()=>{});
+
+    onSnapshot(savingDocRef,(snapshot)=>{
+      if(!snapshot.exists()){
+        saveToCloud();
+        return;
+      }
+
+      const cloudData=snapshot.data();
+
+      if(Array.isArray(cloudData.data)){
+        applyingCloud=true;
+
+        data=cloudData.data
+          .map(x=>({
+            i:+x.i,
+            yu:+x.yu||0,
+            kana:+x.kana||0,
+            expense:+x.expense||0
+          }))
+          .sort((a,b)=>a.i-b.i);
+
+        localStorage.setItem(STORE,JSON.stringify(data));
+        render();
+        loadForm();
+
+        applyingCloud=false;
+        syncReady=true;
+        setSyncStatus("リアルタイム同期中","label green");
+        setSyncMessage("優・佳奈ちゃんの端末で同じデータを共有中です。");
+      }
+    },(error)=>{
+      console.error(error);
+      setSyncStatus("接続エラー","label red");
+      setSyncMessage("同期エラー。Firestoreルールが allow read, write になっているか確認してください。");
+      toast("同期エラー。Firestoreルールを確認してください。");
+    });
+
+  }catch(error){
+    console.error(error);
+    setSyncStatus("開始失敗","label red");
+    setSyncMessage("クラウド同期の開始に失敗しました。");
+    toast("クラウド同期の開始に失敗しました。");
+  }
+}
 
 if("serviceWorker" in navigator && location.protocol.startsWith("http")){
   const swCode=`const CACHE="yk-savings-v1";self.addEventListener("install",e=>{e.waitUntil(caches.open(CACHE).then(c=>c.addAll(["./"])))});self.addEventListener("fetch",e=>{e.respondWith(fetch(e.request).catch(()=>caches.match(e.request)))})`;
